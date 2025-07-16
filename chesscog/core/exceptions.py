@@ -15,7 +15,7 @@ class ChessboardNotLocatedException(RecognitionException):
     """
 
     def __init__(self, reason: str = None):
-        message = "chessboard could not be located"
+        message = "chessboard could not be located, try taking a clearer picture"
         if reason:
             message += ": " + reason
         super().__init__(message)

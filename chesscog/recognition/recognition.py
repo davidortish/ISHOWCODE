@@ -19,7 +19,7 @@ This module simultaneously acts as a script to perform a single inference:
       --black     indicate that the image is from the black player's
                   perspective
 """
-
+from roboflow_detection import detect
 import numpy as np
 import chess
 from chess import Status
@@ -38,6 +38,8 @@ from chesscog.piece_classifier import create_dataset as create_piece_dataset
 from chesscog.core import device, DEVICE
 from chesscog.core.dataset import build_transforms, Datasets
 from chesscog.core.dataset import name_to_piece
+image_path = r"C:\chessPositions\chessBoard.png"
+detect.get_chess_pieces(image_path)
 
 
 class ChessRecognizer:
@@ -73,7 +75,7 @@ class ChessRecognizer:
         model_file = next(iter(path.glob("*.pt")))
         yaml_file = next(iter(path.glob("*.yaml")))
         cfg = CN.load_yaml_with_base(yaml_file)
-        model = torch.load(model_file, map_location=DEVICE)
+        model = torch.load(model_file, map_location=DEVICE, weights_only=False)
         model = device(model)
         model.eval()
         return cfg, model
@@ -198,7 +200,11 @@ def main(classifiers_folder: Path = URI("models://"), setup: callable = lambda: 
     parser.add_argument(
         "--black", help="indicate that the image is from the black player's perspective", action="store_false", dest="color")
     parser.set_defaults(color=True)
-    args = parser.parse_args()
+    class Args:
+        file = r"C:\chessPositions\0200.png"  # <-- your image path
+        color = True  # True for white's perspective, False for black's
+
+    args = Args() 
 
     setup()
 
@@ -217,7 +223,6 @@ def main(classifiers_folder: Path = URI("models://"), setup: callable = lambda: 
         print()
         print("WARNING: The predicted chess position is not legal according to the rules of chess.")
         print("         You might want to try again with another picture.")
-
 
 if __name__ == "__main__":
     from chesscog.occupancy_classifier.download_model import ensure_model as ensure_occupancy_classifier

@@ -51,7 +51,7 @@ def find_corners(cfg: CN, img: np.ndarray) -> np.ndarray:
     edges = _detect_edges(cfg.EDGE_DETECTION, gray)
     lines = _detect_lines(cfg, edges)
     if lines.shape[0] > 400:
-        raise ChessboardNotLocatedException("too many lines in the image")
+        raise ChessboardNotLocatedException("too many lines in the image, try a different image")
     all_horizontal_lines, all_vertical_lines = _cluster_horizontal_and_vertical_lines(
         lines)
 
@@ -204,7 +204,7 @@ def _cluster_horizontal_and_vertical_lines(lines: np.ndarray):
     thetas = lines[..., 1].reshape(-1, 1)
     distance_matrix = pairwise_distances(
         thetas, thetas, metric=_absolute_angle_difference)
-    agg = AgglomerativeClustering(n_clusters=2, affinity="precomputed",
+    agg = AgglomerativeClustering(n_clusters=2, metric="precomputed",
                                   linkage="average")
     clusters = agg.fit_predict(distance_matrix)
 
@@ -304,6 +304,7 @@ def _compute_homography(intersection_points: np.ndarray, row1: int, row2: int, c
                            [1, 0],  # top right
                            [1, 1],  # bottom right
                            [0, 1]])  # bottom left
+    
     return compute_transformation_matrix(src_points, dst_points)
 
 
