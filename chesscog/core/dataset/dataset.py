@@ -50,7 +50,7 @@ def name_to_piece(name: str) -> chess.Piece:
     Returns:
         chess.Piece: the instance of :class:`chess.Piece`
     """
-    color, piece_type = name.split("_")
+    color, piece_type = name.split("-")
     color = color == "white"
     piece_type = chess.PIECE_NAMES.index(piece_type)
     return chess.Piece(piece_type, color)
