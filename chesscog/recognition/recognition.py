@@ -42,6 +42,9 @@ from recap import URI
 from recap import CfgNode as CN
 from roboflow_detection import detect
 
+image_path = r"C:\chessPositions\chessBoard.png"
+detect.get_chess_pieces(image_path)
+
 
 class ChessRecognizer:
     """A class implementing the entire chess inference pipeline.
@@ -57,23 +60,18 @@ class ChessRecognizer:
             "config://corner_detection.yaml"
         )
 
-    @staticmethod
-    def order_corners(corners: np.ndarray) -> np.ndarray:
-        """
-        Orders 4 corner points as: top-left, top-right, bottom-right, bottom-left.
-        This is necessary for perspective warping to behave correctly.
-        """
-        corners = corners.reshape(4, 2)
-        s = corners.sum(axis=1)
-        diff = np.diff(corners, axis=1)
-
-        top_left = corners[np.argmin(s)]
-        bottom_right = corners[np.argmax(s)]
-        top_right = corners[np.argmin(diff)]
-        bottom_left = corners[np.argmax(diff)]
-
-        return np.array(
-            [top_left, top_right, bottom_right, bottom_left], dtype="float32"
+        self._occupancy_cfg, self._occupancy_model = self._load_classifier(
+            classifiers_folder / "occupancy_classifier"
+        )
+        self._occupancy_transforms = build_transforms(
+            self._occupancy_cfg, mode=Datasets.TEST
+        )
+        self._pieces_cfg, self._pieces_model = self._load_classifier(
+            classifiers_folder / "piece_classifier"
+        )
+        self._pieces_transforms = build_transforms(self._pieces_cfg, mode=Datasets.TEST)
+        self._piece_classes = np.array(
+            list(map(name_to_piece, self._pieces_cfg.DATASET.CLASSES))
         )
 
     @classmethod
@@ -96,51 +94,55 @@ class ChessRecognizer:
         model.eval()
         return cfg, model
 
-    def _zoom_center(self, image: np.ndarray, zoom_factor: float = 2.0) -> np.ndarray:
-        """
-        Zoom into the center of the image by the given zoom factor.
-
-        Args:
-            image: RGB image as a NumPy array.
-            zoom_factor: Factor to zoom (e.g., 2.0 zooms into the center 1/2 region).
-
-        Returns:
-            Zoomed-in image with same dimensions.
-        """
-        h, w = image.shape[:2]
-        new_h = int(h / zoom_factor)
-        new_w = int(w / zoom_factor)
-
-        top = (h - new_h) // 2
-        left = (w - new_w) // 2
-
-        cropped = image[top : top + new_h, left : left + new_w]
-        zoomed = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_NEAREST)
-        return zoomed
-
-    def _zoom_in_on_center(self, img: np.ndarray, size: int = 600):
-        h, w, _ = img.shape
-        cx, cy = w // 2, h // 2
-        half = size // 2
-
-        # Crop image
-        cropped = img[cy - half : cy + half, cx - half : cx + half]
-
-        # The original warped board corners are at (0,0), (w,0), (w,h), (0,h)
-        # After cropping, the new corners shift by (cx - half, cy - half)
-        new_corners = np.array(
-            [[0, 0], [size, 0], [size, size], [0, size]], dtype="float32"
+    def _classify_occupancy(
+        self, img: np.ndarray, turn: chess.Color, corners: np.ndarray
+    ) -> np.ndarray:
+        warped = create_occupancy_dataset.warp_chessboard_image(img, corners)
+        square_imgs = map(
+            functools.partial(create_occupancy_dataset.crop_square, warped, turn=turn),
+            self._squares,
         )
+        square_imgs = map(Image.fromarray, square_imgs)
+        square_imgs = map(self._occupancy_transforms, square_imgs)
+        square_imgs = list(square_imgs)
+        square_imgs = torch.stack(square_imgs)
+        square_imgs = device(square_imgs)
+        occupancy = self._occupancy_model(square_imgs)
+        occupancy = occupancy.argmax(
+            axis=-1
+        ) == self._occupancy_cfg.DATASET.CLASSES.index("occupied")
+        occupancy = occupancy.cpu().numpy()
+        return occupancy
 
-        return cropped, new_corners
+    def _classify_pieces(
+        self,
+        img: np.ndarray,
+        turn: chess.Color,
+        corners: np.ndarray,
+        occupancy: np.ndarray,
+    ) -> np.ndarray:
+        occupied_squares = np.array(self._squares)[occupancy]
+        warped = create_piece_dataset.warp_chessboard_image(img, corners)
+        piece_imgs = map(
+            functools.partial(create_piece_dataset.crop_square, warped, turn=turn),
+            occupied_squares,
+        )
+        piece_imgs = map(Image.fromarray, piece_imgs)
+        piece_imgs = map(self._pieces_transforms, piece_imgs)
+        piece_imgs = list(piece_imgs)
+        piece_imgs = torch.stack(piece_imgs)
+        piece_imgs = device(piece_imgs)
+        pieces = self._pieces_model(piece_imgs)
+        pieces = pieces.argmax(axis=-1).cpu().numpy()
+        pieces = self._piece_classes[pieces]
+        all_pieces = np.full(len(self._squares), None, dtype=object)
+        all_pieces[occupancy] = pieces
+        return all_pieces
 
-    # _classify_occupancy removed: not needed with Roboflow-only pipeline
-
-    def _build_board_from_roboflow(
-        self, image_path: str, corners: np.ndarray, turn: chess.Color
-    ) -> chess.Board:
-        """
-        Build a chess.Board from Roboflow detection results using piece locations and types.
+    def predict(
+        self, img: np.ndarray, turn: chess.Color = chess.WHITE
+    ) -> typing.Tuple[chess.Board, np.ndarray]:
+        """Perform an inference.
 
         Args:
             image_path (str): Path to the input image.
@@ -154,6 +156,12 @@ class ChessRecognizer:
         board = chess.Board()
         board.clear()
         board.turn = turn
+
+        # Obtain corners using the corner detection pipeline
+        img = cv2.imread(str(image_path))
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img, img_scale = resize_image(self._corner_detection_cfg, img)
+        corners = find_corners(self._corner_detection_cfg, img)
 
         label_to_piece = {
             "white-pawn": chess.Piece(chess.PAWN, chess.WHITE),
@@ -341,15 +349,9 @@ class ChessRecognizer:
         """Perform an inference using only Roboflow for piece detection."""
         with torch.no_grad():
             img, img_scale = resize_image(self._corner_detection_cfg, img)
-
-            # Find and order the board corners
-            raw_corners = find_corners(self._corner_detection_cfg, img)
-            corners = self.order_corners(raw_corners)
-
-            # Classify pieces using Roboflow (no occupancy classifier)
-            pieces = self._classify_pieces(
-                img, turn, corners, camera_is_white_side, visualise
-            )
+            corners = find_corners(self._corner_detection_cfg, img)
+            occupancy = self._classify_occupancy(img, turn, corners)
+            pieces = self._classify_pieces(img, turn, corners, occupancy)
 
             # Build the board
             board = chess.Board()
@@ -406,12 +408,36 @@ class TimedChessRecognizer(ChessRecognizer):
 
 
 def main(classifiers_folder: Path = URI("models://"), setup: callable = lambda: None):
-    # === Manually set your input values here ===
-    image_path = (
-        r"chess_positions\chesscog\chesscog\recognition\0382.png"  # <<-- CHANGE THIS
+    """Main method for running inference from the command line.
+
+    Args:
+        classifiers_folder (Path, optional): the path to the classifiers (supplying a different path is especially useful because the transfer learning classifiers are located at ``models://transfer_learning``). Defaults to ``models://``.
+        setup (callable, optional): An optional setup function to be called after the CLI argument parser has been setup. Defaults to lambda:None.
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Run the chess recognition pipeline on an input image"
     )
-    camera_white = False  # Set to False if image is from black's perspective
-    turn_white = False  # Set to False if it's black's turn
+    parser.add_argument("file", help="path to the input image", type=str)
+    parser.add_argument(
+        "--white",
+        help="indicate that the image is from the white player's perspective (default)",
+        action="store_true",
+        dest="color",
+    )
+    parser.add_argument(
+        "--black",
+        help="indicate that the image is from the black player's perspective",
+        action="store_false",
+        dest="color",
+    )
+    parser.set_defaults(color=True)
+
+    class Args:
+        file = r"C:\chessPositions\0200.png"  # <-- your image path
+        color = True  # True for white's perspective, False for black's
+
+    args = Args()
 
     setup()
 
@@ -421,8 +447,8 @@ def main(classifiers_folder: Path = URI("models://"), setup: callable = lambda: 
     recognizer = ChessRecognizer(classifiers_folder)
     board, *_ = recognizer.predict(
         img,
-        chess.WHITE if turn_white else chess.BLACK,
-        camera_is_white_side=camera_white,
+        chess.WHITE if args.color else chess.BLACK,
+        camera_is_white_side=args.color,
     )
 
     flipped_board = recognizer._flip_board_horizontally(board)
